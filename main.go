@@ -32,22 +32,6 @@ func getShard(key string) int {
   return int(crc32.ChecksumIEEE([]byte(key))) % numShards
 }
 
-func worker(ctx context.Context, wg *sync.WaitGroup, fileReadJobs <-chan []byte, results chan<- Result) {
-  defer wg.Done()
-
-  for {
-    select {
-    case <-ctx.Done():
-      return
-    case chunk, ok := <-fileReadJobs:
-      if !ok {
-        return
-      }
-      results <- Result{string(chunk)}
-    }
-  }
-}
-
 func parseValues(chunk string) {
   lines := strings.Split(chunk, "\n")
 
@@ -89,6 +73,24 @@ func parseValues(chunk string) {
   }
 }
 
+
+func worker(ctx context.Context, wg *sync.WaitGroup, fileReadJobs <-chan []byte) {
+  defer wg.Done()
+
+  for {
+    select {
+    case <-ctx.Done():
+      return
+    case chunk, ok := <-fileReadJobs:
+      if !ok {
+        return
+      }
+      chunkText := string(chunk)
+      parseValues(chunkText)
+    }
+  }
+}
+
 func readFile(fileReadJobs chan<- []byte) error {
   file, err := os.Open("./measurements.txt")
   if err != nil {
@@ -100,7 +102,7 @@ func readFile(fileReadJobs chan<- []byte) error {
   chunk := make([]byte, CHUNK_SIZE)
 
   for {
-    n, err := reader.Read(chunk)
+    size, err := reader.Read(chunk)
     if err != nil {
       if err.Error() == "EOF" {
         break
@@ -108,10 +110,12 @@ func readFile(fileReadJobs chan<- []byte) error {
       return err
     }
 
-    fileReadJobs <- chunk[:n]
+    fileReadJobs <- chunk[:size]
   }
 
+
   close(fileReadJobs)
+
   return nil
 }
 
@@ -122,11 +126,9 @@ func main() {
   runtime.GOMAXPROCS(numCpu)
 
   var wg sync.WaitGroup
-  var resultWg sync.WaitGroup
 
   goroutineCount := numCpu * 4
 
-  results := make(chan Result, goroutineCount)
   fileReadJobs := make(chan []byte, goroutineCount)
 
   ctx, cancel := context.WithCancel(context.Background())
@@ -136,16 +138,8 @@ func main() {
 
   for i := 0; i < goroutineCount; i++ {
     wg.Add(1)
-    go worker(ctx, &wg, fileReadJobs, results)
+    go worker(ctx, &wg, fileReadJobs)
   }
-
-  resultWg.Add(1)
-  go func() {
-    defer resultWg.Done()
-    for result := range results {
-      parseValues(result.text)
-    }
-  }()
 
   go func() {
     err := readFile(fileReadJobs)
@@ -155,12 +149,8 @@ func main() {
     }
   }()
 
-  go func() {
-    wg.Wait()
-    close(results)
-  }()
+  wg.Wait()
 
-  resultWg.Wait()
 
   file, err := os.Create("./output.txt")
 
